@@ -1,0 +1,257 @@
+---
+title: "HW1 Q4"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ISLR)
+library(glmnet)
+library(leaps)
+set.seed(1)
+library(tidyverse)
+library(caret)
+library(pls)
+```
+
+## Data
+
+```{r data}
+prostate <- read.table("http://statweb.stanford.edu/~tibs/ElemStatLearn/datasets/prostate.data")
+prostate <- na.omit(prostate)
+
+train_X <- prostate %>% dplyr::filter(train) %>% select(-train, -lpsa)
+train_Y <- prostate %>% dplyr::filter(train) %>% select(lpsa)
+
+train <- prostate %>% dplyr::filter(train) %>% select(-train)
+
+test_X <- prostate %>% dplyr::filter(!train) %>% select(-train, -lpsa)
+test_Y <- prostate %>% dplyr::filter(!train) %>% select(lpsa)
+
+X <- as.matrix(train_X)
+Y <- as.matrix(train_Y)
+```
+
+### (a) Best-subset linear regression with k chosen by 5-fold cross-validation
+
+Prepare key functions and variables
+```{r a}
+# 5 folds
+k = 5
+n = 8 # 8 variables
+set.seed(1)
+folds = sample(1:k, nrow(X), replace = TRUE)
+
+predict.regsubsets = function(object,newdata,id,...){
+      form = as.formula(object$call[[2]]) # Extract the formula used when we called regsubsets()
+      mat = model.matrix(form,newdata)    # Build the model matrix
+      coefi = coef(object,id=id)          # Extract the coefficiants of the ith model
+      xvars = names(coefi)                # Pull out the names of the predictors used in the ith model
+      mat[,xvars] %*% coefi               # Make predictions using matrix multiplication
+}
+```
+
+```{r plot_a}
+# cv_error
+cv_errors = matrix(NA, k, n, dimnames = list(NULL, paste(1:n)))
+# Outer loop iterates over all folds
+for(j in 1:k){
+    # best subset selection on the full dataset, minus the jth fold
+    best_fit = regsubsets(lpsa~., data = train[folds!=j,], nvmax = n, method = "exhaustive")
+    # Inner loop iterates over each size i
+    for(i in 1:n){
+        # Predict the values of the current fold from the "best subset" model on i predictors
+        pred = predict(best_fit, train[folds == j,], id = i)
+        # Calculate the MSE, store it in the matrix we created above
+        cv_errors[j,i] = mean((Y[folds == j] - pred)^2)
+    }
+}
+
+# Take the mean of over all folds for each model size
+mean_cv_errors = apply(cv_errors, 2, mean)
+mean_cv_sd = apply(cv_errors, 2, sd)
+mean_cv_up = mean_cv_errors + mean_cv_sd
+mean_cv_lo = mean_cv_errors - mean_cv_sd
+
+# Find the model size with the smallest cross-validation error
+min = which.min(mean_cv_errors)
+
+
+plot(mean_cv_errors, type = 'b',
+     ylim = c(min(mean_cv_lo), max(mean_cv_up)),
+     col = "dodgerblue",
+     xlab = "Number of variables",
+     ylab = "Average CV Error (MSE)",
+     main = "CV prediction error curves for Best Subset")
+# hack: we draw arrows but with very special "arrowheads"
+arrows(1:n, mean_cv_up, 1:n, mean_cv_lo, length=0.05, angle=90, code=3)
+points(min, mean_cv_errors[min][1], col = "red", cex = 2, pch = 20)
+abline(h = (mean_cv_up)[which.min(mean_cv_errors)], col = "lightgray", lwd = 2)
+# Plot the cross-validation error for each model size, highlight the min
+#plot(mean_cv_errors, type='b')
+#points(min, mean_cv_errors[min][1], col = "red", cex = 2, pch = 20)
+```
+
+Best-subset model gives us the best variable size of 7 with the lowest CV error. If we use 1se standard, we select the model of size 2. 
+
+
+### (b) Best-subset linear regression with k chosen by BIC.
+
+```{r b}
+best <- regsubsets(x = X, y = Y, method = "exhaustive")
+reg_summary <- summary(best);reg_summary
+plot(reg_summary$bic, 
+     xlab = "Number of Variables", 
+     ylab = "BIC", 
+     type = "b",
+     main = "Best-subset linear regression with k chosen by BIC")
+bic_min = which.min(reg_summary$bic) # 2
+points(bic_min, reg_summary$bic[bic_min], col = "red", cex = 2, pch = 20)
+```
+
+We choose $k=2$. The BIC decreases at the beginning, reaches to a lowest point and then keep increasing when model complexity increases. As we seen in class, BIC tends to select the parsimony model.
+
+### (c) Lasso regression with $\lambda$ chosen by 5-fold cross-validation.
+
+```{r c}
+# model training
+set.seed(1)
+cv.lasso <- cv.glmnet(X, Y, 
+                      alpha = 1,
+                      lambda = exp(seq(1, -6, length = 100)),
+                      nfolds = 5)
+plot(cv.lasso)
+cv.lasso$lambda.min
+cv.lasso$lambda.1se
+```
+The chosen lambda using 1se rule is 0.1606893. The minimum MSE lambda is 0.01174363.
+
+With increase complexity:
+```{r}
+lasso.table <- data.frame(complexity = cv.lasso$glmnet.fit$df/8, mse = cv.lasso$cvm, mse_u = cv.lasso$cvup, mse_l = cv.lasso$cvlo)
+
+lasso.table <- lasso.table %>% 
+  group_by(complexity) %>% 
+  summarise_at(vars(mse, mse_u, mse_l), mean)
+
+plot(lasso.table$complexity, lasso.table$mse, type = 'b',
+     ylim = c(min(lasso.table$mse_l), max(lasso.table$mse_u)),
+     col = "dodgerblue",
+     xlab = "Shrinkage factor s",
+     ylab = "Average CV Error (MSE)",
+     main = "CV prediction error curves for Lasso")
+# hack: we draw arrows but with very special "arrowheads"
+arrows(lasso.table$complexity, lasso.table$mse_u, lasso.table$complexity, lasso.table$mse_l, length=0.05, angle=90, code=3)
+points(which.min(lasso.table$mse)/8, lasso.table$mse[which.min(lasso.table$mse)], col = "red", cex = 2, pch = 20)
+abline(h = (cv.lasso$cvm + cv.lasso$cvsd)[which.min(cv.lasso$cvm)], col = "lightgray", lwd = 2)
+```
+
+The CV gives us a vairbale subset of 8. If we use 1se standard, we have a variable subset of 5.
+
+### (d) Lasso regression with $\lambda$ chosen by BIC.
+
+```{r d}
+lasso.bic <- glmnet(x = X, y = Y, standardize = TRUE, alpha = 1, lambda = exp(seq(1, -6, length = 100)))
+
+# calculate BIC
+tLL <- lasso.bic$nulldev - deviance(lasso.bic)
+k <- lasso.bic$df
+n <- lasso.bic$nobs
+
+BIC <- log(n)*k - tLL
+# mean BIC for each shrinkage factor s
+lasso.bic.table <- data.frame(complexity = lasso.bic$df/8, bic = BIC)
+
+lasso.bic.table <- lasso.bic.table %>% 
+  group_by(complexity) %>% 
+  summarise_at(vars(bic), base::min)
+
+plot(x = lasso.bic.table$complexity, y = lasso.bic.table$bic, type = 'b',
+     col = "dodgerblue",
+     xlab = "Shrinkage factor s",
+     ylab = "BIC",
+     main = "BIC curves for Lasso")
+points(lasso.bic$df/8, BIC, col = "gray")
+points(lasso.bic.table$complexity, lasso.bic.table$bic, col = "blue")
+lasso.bic$lambda[which.min(BIC)]
+```
+
+We select the model with lowest BIC score. So we have a variable subset of 3 (The plot starts from df=1). The chosen lambda is 0.2132149.
+
+### (e) Principle component regression with q chosen by 5-fold cross-validation.
+
+```{r d}
+set.seed(1)
+# 5 folds cv
+pcr.mod <- pcr(lpsa ~., data = train, scale = TRUE, validation = "CV", segments = 5)
+validationplot(pcr.mod, val.type = "MSEP", legendpos = "topright", type = 'b',col="blue",
+               xlab = "Number of Directions",
+     ylab = "CV Error",
+     main = "Principal Component Regression")
+summary(pcr.mod)
+```
+The chosen q is 8, which gives us the smallest MSE CV error. 
+
+## Table for Test Error
+
+```{r}
+test <- prostate %>% dplyr::filter(!train) %>% select(-train)
+
+
+# 5-fold and BIC selected Best subset
+bs.bic = regsubsets(y = Y, x = X, nvmax = 8, method = "exhaustive")
+bs.coef <- coef(bs.bic, id = 2)
+
+bs.bic <- lm(lpsa~ lcavol + lweight, data = train)
+bs.bic.pred <- predict(bs.bic, newdata = test)
+bs.bic.pred.error = mean((test$lpsa - bs.bic.pred)^2)
+bs.bic.pred.std = sd(test$lpsa - bs.bic.pred)
+
+#lasso 5-folds CV
+#coef
+lasso.cv.coef <- predict(cv.lasso, s = "lambda.1se", type = "coefficient")[,1]
+# test error
+lasso.cv.pred <- predict(cv.lasso, newx = as.matrix(test_X), s="lambda.1se", type = "response")
+lasso.cv.pred.error = mean((test$lpsa - lasso.cv.pred)^2)
+lasso.cv.pred.std = sd(test$lpsa - lasso.cv.pred)
+
+#lasso bic
+#coef
+lasso.bic.coef <- coef(lasso.bic)[,which.min(BIC)]
+# test error
+lasso.bic.pred <- predict(lasso.bic, newx = as.matrix(test_X), type = "response")[,which.min(BIC)]
+lasso.bic.pred.error = mean((test$lpsa - lasso.bic.pred)^2)
+lasso.bic.pred.std = sd(test$lpsa - lasso.bic.pred)
+
+# 5-folds for PCR
+# we choose 8 component
+cv.mse <- RMSEP(pcr.mod)
+ncomp.cv <- which.min(cv.mse$val[1,,])-1
+pcr.coeff <- pcr.mod$coefficients[,,8]
+
+pcr.cv.pred <- predict(pcr.mod, newdata = test, comps = 8)
+pcr.cv.pred.error = mean((test$lpsa - pcr.cv.pred)^2)
+pcr.cv.pred.std = sd(test$lpsa - pcr.cv.pred)
+
+```
+
+Table:
+
+```{r}
+output <- rbind(Best_Subset_CV = bs.coef,
+                     Best_Subset_BIC = bs.coef,
+                     Lasso_CV = lasso.cv.coef,
+                     Lasso_BIC = lasso.bic.coef,
+                     PCR_CV = pcr.coeff)
+output <- cbind(output, 
+                Test_Error = c(bs.bic.pred.error, bs.bic.pred.error,lasso.cv.pred.error, pcr.cv.pred.error), 
+                Test_Error_STD = c(bs.bic.pred.std, bs.bic.pred.std, lasso.bic.pred.std, lasso.bic.pred.std,
+                                   pcr.cv.pred.std))
+rownames(output) <- c("Best Subset CV","Best Subset BIC","Lasso CV","Lasso BIC","PCR CV")
+output %>% knitr::kable(digits = 3, 
+                        col.names = c("Intercept", "lcavol", "lweight", 
+                                                  "age", "lbph", "svi", "lcp", "gleason", "pgg45", 
+                                                  "Test Error", "Test Error SD"))
+```
+
+
